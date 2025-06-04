@@ -1,0 +1,273 @@
+---
+title: "Digit Classification Interactive Lesson"
+output: learnr::tutorial
+runtime: shiny_prerendered
+tutorial:
+  id: digit-classification-rsnns
+  description: "Experiment with RSNNS to classify handwritten digits."
+  version: 1.0.0
+---
+
+```{r setup, include=FALSE}
+
+required_packages <- c("learnr", "RSNNS", "readr", "dplyr")
+
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(new_packages)) install.packages(new_packages)
+
+library(learnr) #for lesson thing
+library(RSNNS) #The Neural Net Bit
+library(readr) #Import CSV
+library(dplyr) 
+
+
+train <- readr::read_csv("https://raw.githubusercontent.com/DefeatedWarrior/DataSci2/main/train.csv") #Pull the dataset from the Github
+
+#This is where data gets cleaned
+
+# Get total number of rows in the original training data
+n <- nrow(train)
+
+# Randomly sample 80% of row indices for training
+train_idx <- sample(n, size = 0.8 * n)  # 80% for training, 20% for validation
+
+# Split the original data into training and validation sets
+train_data <- train[train_idx, ]        # Training subset (80%)
+val_data <- train[-train_idx, ]         # Validation subset (remaining 20%)
+
+# Prepare training features:
+# - Drop the label column
+# - Convert to matrix
+# - Normalize pixel values to [0, 1]
+x_train <- as.matrix(train_data[, -1]) / 255
+
+# Prepare training labels as one-hot vectors for RSNNS
+y_train <- decodeClassLabels(train_data$label)
+
+# Prepare validation features and labels
+x_val <- as.matrix(val_data[, -1]) / 255     # Same normalization
+y_val <- val_data$label                      # Keep raw labels for accuracy check
+
+
+```
+
+```{r js_ui, echo=FALSE, results='asis'}
+tags$script(HTML("
+
+  // Register a custom message handler named 'initPixelClicks'
+  // This is called from the server with: session$sendCustomMessage(...)
+  Shiny.addCustomMessageHandler('initPixelClicks', function(message) {
+
+    // Remove any previous click event listeners on pixel divs (avoid duplicates)
+    $(document).off('click', \"div[id^='pixel_']\");
+
+    // Add new click event listener to any divs with IDs starting with 'pixel_'
+    $(document).on('click', \"div[id^='pixel_']\", function() {
+      
+      // Send the clicked pixel's ID back to the Shiny input system
+      Shiny.setInputValue('clicked_pixel', this.id, {priority: 'event'});
+    });
+  });
+
+"))
+```
+
+## Welcome
+
+Welcome to the interactive tutorial on digit classification using a neural network in R.
+
+---
+
+## Choose Model Architecture
+
+Use the slider below to adjust the number of neurons in the hidden layer. (64 or less for this lesson.) Press train now button and proceed to next section.
+
+```{r input_panel}
+sliderInput("hidden_size", "Number of hidden neurons:", min = 4, max = 256, value = 64, step = 4)
+
+actionButton("train_button", "Train Model")
+
+```
+
+---
+
+## Train the Neural Network
+
+Wait here until Training completed successfully!
+
+```{r train_model, context="server"}
+
+
+# Define a reactive expression for training the model
+# This re-trains the model each time the "Train Model" button is clicked
+model <- eventReactive(input$train_button, {
+  
+  set.seed(123)  # Ensures reproducibility of training results
+
+  # Train a Multi-Layer Perceptron (MLP) using RSNNS
+  # Arguments:
+  # - x_train: input features (matrix, scaled to [0, 1])
+  # - y_train: one-hot encoded labels
+  # - size: number of hidden neurons (from user-selected slider)
+  # - learnFunc: standard backpropagation algorithm
+  # - learnFuncParams: learning rate of 0.1
+  # - maxit: run for 50 iterations (epochs)
+  mlp(
+    x_train,
+    y_train,
+    size = input$hidden_size,
+    learnFunc = "Std_Backpropagation",
+    learnFuncParams = c(0.1),
+    maxit = 50
+  )
+})
+
+# Output message to indicate whether training completed successfully
+output$train_status <- renderText({
+  req(input$train_button)  # Only proceed if the train button has been clicked
+
+  isolate({  # Prevent reactivity from triggering unnecessary re-runs
+    if (!is.null(model())) {
+      "Training completed successfully!"  # Model is trained and ready
+    } else {
+      "Model training failed."  # Something went wrong
+    }
+  })
+})
+
+
+
+```
+
+```{r train_status_ui}
+textOutput("train_status") 
+
+#Actually outputing that (Could add this to the other page but thats a major change and I don't want to tempt the vengeful programming gods)
+```
+
+---
+
+## Test Model
+
+```{r inpred}
+# Heading for the digit drawing section
+h3("Draw a Digit")
+
+# Inject custom CSS styles to remove spacing between grid pixels
+tags$style(HTML("
+  /* Ensure each individual pixel (div) has no margin/padding */
+  #draw_grid_ui div[id^='pixel_'] {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Also remove padding/margin from rows in the grid container */
+  #draw_grid_ui > div {
+    margin: 0;
+    padding: 0;
+  }
+"))
+
+# Display the 28x28 interactive drawing grid
+uiOutput("draw_grid_ui")
+
+# Button to clear the drawing (reset all pixels to white)
+actionButton("clear_grid", "Clear Drawing")
+
+# Button to run the model on the current drawing
+actionButton("predict_drawn", "Predict Drawn Digit")
+
+# Output area to display predicted digit (e.g., "Predicted digit is: 7")
+verbatimTextOutput("draw_prediction")
+
+
+```
+
+```{r prediction, context="server"}
+# Create a reactive 28x28 matrix initialized to 0s.
+# This will represent the drawn digit (each cell is a pixel: 0 = off, 1 = on).
+drawing <- reactiveVal(matrix(0, nrow = 28, ncol = 28))
+
+# Render the 28x28 drawing grid UI using a nested set of <div> elements.
+output$draw_grid_ui <- renderUI({
+  mat <- drawing()  # Get the current drawing matrix
+  
+  # Create 28 rows
+  rows <- lapply(1:28, function(row) {
+    
+    # For each row, create 28 square "pixel" cells
+    cells <- lapply(1:28, function(col) {
+      pixel_id <- paste0("pixel_", row, "_", col)  # Unique ID for each pixel
+      
+      # Create a small square div with black or white background depending on state
+      div(
+        id = pixel_id,
+        style = paste0(
+          "width: 15px; height: 15px; border: 1px solid #ddd; cursor: pointer; background-color:",
+          ifelse(mat[row, col] == 1, "black", "white"),  # Black if ON, white if OFF
+          "; margin: 0; padding: 0;"
+        )
+      )
+    })
+    
+    # Wrap each row of cells in a horizontal flex container
+    div(style = "display: flex; margin: 0; padding: 0;", cells)
+  })
+  
+  # Send a message to JS side to initialize pixel click event listeners
+  session$sendCustomMessage("initPixelClicks", list())
+  
+  # Return the full grid of rows
+  tagList(rows)
+})
+
+# React to a pixel being clicked (JS sends back the clicked pixel's ID)
+observeEvent(input$clicked_pixel, {
+  coords <- strsplit(input$clicked_pixel, "_")[[1]][-1]  # Extract row/col from ID
+  row <- as.integer(coords[1])
+  col <- as.integer(coords[2])
+  
+  mat <- drawing()                   # Get current drawing
+  mat[row, col] <- 1 - mat[row, col] # Toggle between 0 and 1 (flip pixel state)
+  drawing(mat)                       # Update the reactive matrix
+})
+
+# Clear the drawing (set all pixels to 0)
+observeEvent(input$clear_grid, {
+  drawing(matrix(0, 28, 28))
+})
+
+# When "Predict" is clicked, run the model on the current drawing
+observeEvent(input$predict_drawn, {
+  req(model())                          # Ensure model is trained
+  
+  input_vec <- as.numeric(t(drawing())) # Flatten the matrix to a vector row-wise
+  pred_probs <- predict(model(), matrix(input_vec, nrow = 1)) # Get prediction
+  pred_digit <- which.max(pred_probs) - 1 # Convert one-hot to digit (0-indexed)
+  
+  # Display the predicted digit
+  output$draw_prediction <- renderText({
+    paste("Predicted digit is:", pred_digit)
+  })
+})
+
+
+```
+
+```{r predict_ui}
+verbatimTextOutput("prediction")
+```
+
+---
+
+## Well Done!
+
+You've built and trained a neural network to classify digits using RSNNS in R. Try adjusting the architecture to see how performance changes! Once done, Continue to the next section to access the quiz
+
+---
+
+## Quiz: What Did You Learn?
+
+Please complete the quiz on Microsoft Forms https://forms.office.com/r/eL9rAr5GQm
